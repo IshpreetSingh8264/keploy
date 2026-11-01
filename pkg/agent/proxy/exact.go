@@ -974,7 +974,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// held, and the call's miss names none made elsewhere.
 		c = c.HoldingEvery()
 	}
-	return c
+	return c.WithTrackerAhead(ahead)
 }
 
 // endedName is the test of v, the view the store ended while the learn
