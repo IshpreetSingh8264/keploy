@@ -382,13 +382,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			return err
 		}
 		// Its end waits only for the requests opened from here.
-		a.beginWindow()
+		a.beginWindow(0)
 		a.markDrops(ctx, drops)
 	default:
 		// A test case that ends is served the pool whatever its settling
 		// found, and told it is not verified when keploy cannot tell its
 		// calls settled: the calls after it are the pool's either way.
-		unknown = a.settledSince(ctx, true, "the test case")
+		unknown = a.settledSince(ctx, true, 0, "the test case")
 	}
 	switch {
 	case ex.Stage:

@@ -236,7 +236,7 @@ func deafAppsClientHangsUp(t *testing.T, serve func(http.Handler) *liveCall) {
 	if line, err := br.ReadString('\n'); err != nil || line != "\r\n" {
 		t.Fatalf("precondition: the chunk's end read %q, %v", line, err)
 	}
-	streaming := lc.tr.scope()
+	streaming := lc.tr.scope(0)
 	if n, _ := streaming.State(true); n != 1 {
 		t.Fatalf("precondition: a live call whose answer streams to its client held no work of a replay's settle (pending %d): %s", n, lc.state())
 	}
@@ -258,7 +258,7 @@ func deafAppsClientHangsUp(t *testing.T, serve func(http.Handler) *liveCall) {
 			t.Fatalf("the hang-up told on to an app deaf to it, the call's connection still holds work (scope's %d): %s", n, lc.state())
 		}
 	}
-	if left := lc.tr.scope().PendingProgress(true); len(left) != 0 {
+	if left := lc.tr.scope(0).PendingProgress(true); len(left) != 0 {
 		t.Fatalf("a settle begun after the hang-up was told on would wait on %v: %s", left, lc.state())
 	}
 	select {
