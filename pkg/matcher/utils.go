@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"mime"
 	"net/http"
 	"os"
@@ -605,12 +606,49 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		return out, nil
 
 	case float64:
-		a, ok := actual.(float64)
-		if !ok {
+		switch a := actual.(type) {
+		case float64:
+			if e == a || ancestorNoisy || noisyForValue(ni, key, formatJSONNumber(a)) {
+				out.matches, out.isExact = true, true
+			}
+		case json.Number:
+			// A caller may still hand in float64 (geko, YAML assertions), so
+			// keep comparing the two number types by value.
+			equal, _ := jsonNumberEqual(json.Number(formatJSONNumber(e)), a)
+			if equal || ancestorNoisy || noisyForValue(ni, key, formatJSONNumberLiteral(a)) {
+				out.matches, out.isExact = true, true
+			}
+		default:
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValue(ni, key, formatJSONNumber(a)) {
-			out.matches, out.isExact = true, true
+		return out, nil
+
+	case json.Number:
+		switch a := actual.(type) {
+		case json.Number:
+			equal, _ := jsonNumberEqual(e, a)
+			noisy := noisyForValue(ni, key, formatJSONNumberLiteral(a))
+			if !noisy {
+				if rec, ok := recordedJSONNumberNoiseRendering(e); ok {
+					noisy = noisyForValue(ni, key, rec)
+				}
+			}
+			if equal || ancestorNoisy || noisy {
+				out.matches, out.isExact = true, true
+			}
+		case float64:
+			equal, _ := jsonNumberEqual(e, json.Number(formatJSONNumber(a)))
+			noisy := noisyForValue(ni, key, formatJSONNumber(a))
+			if !noisy {
+				if rec, ok := recordedJSONNumberNoiseRendering(e); ok {
+					noisy = noisyForValue(ni, key, rec)
+				}
+			}
+			if equal || ancestorNoisy || noisy {
+				out.matches, out.isExact = true, true
+			}
+		default:
+			return out, errors.New("type not matched")
 		}
 		return out, nil
 
@@ -667,8 +705,20 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				return out, nil
 			}
 
-			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, val, true) {
-				continue
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal {
+				if noisyForRegexps(regs, val, true) {
+					continue
+				}
+				// The recorded number may have been re-rendered by the old
+				// float path (1.0 printed as 1), so a pattern written against
+				// it can still name the field even when the replay does not.
+				if en, ok := v.(json.Number); ok {
+					if _, ok := val.(json.Number); ok {
+						if rec, ok := recordedJSONNumberNoiseRendering(en); ok && anyRegexpMatchStr(rec, regs) {
+							continue
+						}
+					}
+				}
 			}
 
 			childKeyLower := prefixLower + strings.ToLower(k)
@@ -918,6 +968,8 @@ func jsonScalarToString(v interface{}) (string, bool) {
 		return t, true
 	case bool:
 		return strconv.FormatBool(t), true
+	case json.Number:
+		return formatJSONNumberLiteral(t), true
 	case float64:
 		return formatJSONNumber(t), true
 	}
@@ -946,6 +998,137 @@ func formatJSONNumber(f float64) string {
 	return string(b)
 }
 
+// formatJSONNumberLiteral renders a json.Number for display and noise matching.
+//
+// A literal whose value fits exactly in float64 is rendered exactly as
+// formatJSONNumber renders that float64, so a noise pattern written against an
+// older recording keeps matching: the recorded {"n":1.0} still renders "1",
+// and "1e3" renders "1000". An integer literal beyond 2^53 is the exception:
+// float64 can no longer hold every digit, so rounding it would change the
+// number. Such a literal is rendered with its recorded digits instead
+// (1234567890123456789 stays "1234567890123456789"). A literal ParseFloat
+// cannot read is returned as written.
+func formatJSONNumberLiteral(n json.Number) string {
+	s := n.String()
+	if isJSONIntegerLiteral(s) {
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+			if i > 1<<53 || i < -(1<<53) {
+				return s
+			}
+		} else {
+			// Outside int64, so certainly outside float64's exact range.
+			return s
+		}
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return formatJSONNumber(f)
+	}
+	return s
+}
+
+// isJSONIntegerLiteral reports whether s spells an integer, the form whose
+// digits float64 stops holding above 2^53.
+func isJSONIntegerLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 0 && s[i] == '-' {
+			continue
+		}
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// recordedJSONNumberNoiseRendering returns the rendering a recorded number had
+// before json.Number kept its literal, when that rendering differs from how the
+// body spells it now. A noise pattern written against the printed recording
+// then names the old spelling, so it is offered the recorded rendering as well.
+// A literal the old float path reproduced unchanged reports false: the replayed
+// value alone decides whether the pattern covers the field, as before.
+func recordedJSONNumberNoiseRendering(n json.Number) (string, bool) {
+	s := n.String()
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || formatJSONNumber(f) == s {
+		return "", false
+	}
+	return formatJSONNumberLiteral(n), true
+}
+
+// jsonNumberEqual compares two JSON number literals by value, not by their
+// spelling. Integer literals are compared as big.Int so any width stays exact;
+// the rest go through big.Rat, because big.Rat.SetString rejects exponent
+// notation. A literal neither parser accepts (a hand-built json.Number, since
+// encoding/json validates its own) falls back to literal equality rather than
+// turning a comparison into a hard error.
+func jsonNumberEqual(a, b json.Number) (bool, error) {
+	as, bs := a.String(), b.String()
+	if as == bs {
+		return true, nil
+	}
+	if !strings.ContainsAny(as, ".eE") && !strings.ContainsAny(bs, ".eE") {
+		ai, aok := new(big.Int).SetString(as, 10)
+		bi, bok := new(big.Int).SetString(bs, 10)
+		if !aok || !bok {
+			return as == bs, fmt.Errorf("invalid JSON number %q or %q", as, bs)
+		}
+		return ai.Cmp(bi) == 0, nil
+	}
+	ar, aerr := jsonNumberRat(as)
+	br, berr := jsonNumberRat(bs)
+	if aerr != nil || berr != nil {
+		return as == bs, errors.Join(aerr, berr)
+	}
+	return ar.Cmp(br) == 0, nil
+}
+
+// maxJSONNumberScale bounds the power of ten jsonNumberRat builds, so a body
+// carrying an absurd exponent cannot turn a comparison into a huge allocation.
+// Past it the literals are compared as strings.
+const maxJSONNumberScale = 1 << 20
+
+// jsonNumberRat parses a JSON number literal exactly as a rational. It handles
+// exponent notation itself, since big.Rat.SetString rejects "1e3".
+func jsonNumberRat(s string) (*big.Rat, error) {
+	mantissa := s
+	exp := 0
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		mantissa = s[:i]
+		e, err := strconv.Atoi(s[i+1:])
+		if err != nil {
+			return nil, err
+		}
+		exp = e
+	}
+	fracDigits := 0
+	if i := strings.IndexByte(mantissa, '.'); i >= 0 {
+		fracDigits = len(mantissa) - i - 1
+		mantissa = mantissa[:i] + mantissa[i+1:]
+	}
+	digits, ok := new(big.Int).SetString(mantissa, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid JSON number %q", s)
+	}
+	scale := exp - fracDigits
+	if scale > maxJSONNumberScale || scale < -maxJSONNumberScale {
+		return nil, fmt.Errorf("JSON number %q has an exponent out of range", s)
+	}
+	r := new(big.Rat).SetInt(digits)
+	if scale > 0 {
+		r.Mul(r, new(big.Rat).SetInt(pow10(scale)))
+	} else if scale < 0 {
+		r.Quo(r, new(big.Rat).SetInt(pow10(-scale)))
+	}
+	return r, nil
+}
+
+func pow10(n int) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
+}
+
 func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (int, bool) {
 	switch v := x.(type) {
 	case string:
@@ -957,13 +1140,36 @@ func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (
 				return i, true
 			}
 		}
+	case json.Number:
+		for i, y := range arr {
+			if used[i] {
+				continue
+			}
+			switch y := y.(type) {
+			case json.Number:
+				if equal, _ := jsonNumberEqual(v, y); equal {
+					return i, true
+				}
+			case float64:
+				if equal, _ := jsonNumberEqual(v, json.Number(formatJSONNumber(y))); equal {
+					return i, true
+				}
+			}
+		}
 	case float64:
 		for i, y := range arr {
 			if used[i] {
 				continue
 			}
-			if yf, ok := y.(float64); ok && yf == v {
-				return i, true
+			switch y := y.(type) {
+			case float64:
+				if y == v {
+					return i, true
+				}
+			case json.Number:
+				if equal, _ := jsonNumberEqual(json.Number(formatJSONNumber(v)), y); equal {
+					return i, true
+				}
 			}
 		}
 	case bool:
@@ -1178,7 +1384,11 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 	if s == "" {
 		return nil, nil
 	}
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
+	dec := json.NewDecoder(strings.NewReader(s))
+	// Keep every digit of a large integer (a snowflake ID, an int64 key): a
+	// plain Unmarshal turns it into a float64 and loses precision above 2^53.
+	dec.UseNumber()
+	if err := dec.Decode(&result); err != nil {
 		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
 		return nil, err
 	}

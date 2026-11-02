@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"hash/fnv"
 	"math"
 	"reflect"
@@ -16,9 +17,9 @@ import (
 // entry points (ValidateAndMarshalJSON, JSONFieldDiffs). The functions here let
 // it parse each document once and keep what it needs.
 //
-// Every document they take is a parsed JSON value exactly as json.Unmarshal
-// into an interface{} leaves it (float64 numbers), the form the string entry
-// points parse into.
+// Every document they take is a parsed JSON value: numbers may be float64, as
+// json.Unmarshal into an interface{} leaves them, or json.Number, as the string
+// entry points parse them.
 
 // NewValidatedJSON wraps two parsed documents for JSONDiffWithNoiseControl, as
 // ValidateAndMarshalJSON does for two strings: IsIdentical reports whether
@@ -108,6 +109,10 @@ func (k *matchKeyer) walk(v interface{}, p string) {
 		} else {
 			k.tag('f', 0)
 		}
+	case json.Number:
+		f := t.String()
+		k.tag('d', len(f))
+		_, _ = k.h.Write([]byte(f))
 	case float64:
 		if t == 0 {
 			t = 0 // -0 == 0 to the matcher

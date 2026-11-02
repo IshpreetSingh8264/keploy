@@ -2,7 +2,6 @@ package matcher
 
 import (
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -356,10 +355,15 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		if !typeStrict {
 			out.values[path] = t
 		}
+	case json.Number:
+		out.types[path] = "number"
+		if !typeStrict {
+			out.values[path] = formatJSONNumberLiteral(t)
+		}
 	case float64:
 		out.types[path] = "number"
 		if !typeStrict {
-			out.values[path] = fmt.Sprintf("%v", t)
+			out.values[path] = formatJSONNumber(t)
 		}
 	case bool:
 		out.types[path] = "boolean"
