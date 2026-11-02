@@ -867,6 +867,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				byTest, owned = plan.tests, plan.perTest
 			}
 			byCase := correlateCases(windows, owned, capture.list(), stepWindows(windows))
+			m.saySharedCharges(name, byCase, owned)
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
@@ -1303,16 +1304,18 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	}
 	for test, entries := range correlateScopes(windows, own) {
 		for _, e := range entries {
-			c := containing(inFlow[flowOf(windows, test)], at[e.Name])
-			if c == "" {
-				continue
+			// Each case in flight when the call was made is charged with
+			// it: of two (a provider's callback and the test's own request),
+			// the time alone cannot tell whose handler made it
+			// (sharedCharges says so).
+			for _, c := range holding(inFlow[flowOf(windows, test)], at[e.Name]) {
+				tc := byTest[holder[c]]
+				if tc.CaseMocks == nil {
+					tc.CaseMocks = map[string][]string{}
+				}
+				tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
+				byTest[holder[c]] = tc
 			}
-			tc := byTest[holder[c]]
-			if tc.CaseMocks == nil {
-				tc.CaseMocks = map[string][]string{}
-			}
-			tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
-			byTest[holder[c]] = tc
 		}
 	}
 	for _, tc := range byTest {
