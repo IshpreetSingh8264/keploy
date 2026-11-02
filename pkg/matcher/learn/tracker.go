@@ -157,8 +157,8 @@ type Tracker struct {
 	// in the order of the real instants it served them at (servedIn), each
 	// with the instant its call reached keploy. NewSet forgets them.
 	servedAt []servedInstant
-	// serveOwner is SetServeOwner's f.
-	serveOwner atomic.Pointer[func(*models.Mock) bool]
+	// serveOwner is SetServeOwnerOf's f.
+	serveOwner atomic.Pointer[func(*models.Mock) ServeOwner]
 	// serveAt is the real instant each of the running set's serves was made
 	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
 	// Order cut at a call's arrival (Order.ArrivedAt) reads. NewSet forgets
@@ -869,7 +869,8 @@ func (t *Tracker) ServedHandshakeIn(m *models.Mock, chosen, in *Flight) {
 // real instant at, to a call that reached keploy at from (no later than at).
 // upTo is the latest from of it and of every serve made before it. mine says
 // the store served the open test's own recording or the start-up's
-// (SetServeOwner), and mineUpTo is the latest from of those serves among it
+// (SetServeOwnerOf's OwnerTest; a serve the store cannot say of, or says is
+// another's, is not), and mineUpTo is the latest from of those serves among it
 // and every serve made before it (zero for none).
 type servedInstant struct {
 	at, from, upTo time.Time
@@ -889,7 +890,7 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 	// install replaces under that lock, so it is the view that served m.
 	mine := false
 	if f := t.serveOwner.Load(); f != nil && !m.IsProtocolPhase() {
-		mine = (*f)(m)
+		mine = (*f)(m) == OwnerTest
 	}
 	t.mu.Lock()
 	if !m.IsProtocolPhase() {
@@ -1998,16 +1999,7 @@ func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arr
 // read of the clock and the call that carries it, so the replay's check
 // passes a value that holds from the test's begin too (CheckClockRead).
 func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
-	if t == nil {
-		return Span{}, false
-	}
-	lc, _ := t.liveClockAt(arrival)
-	s, ok := lc.span(arrival)
-	if ok {
-		s.Zone = lc.zone
-		s.TestFrom = lc.testFrom(s.From, arrival)
-	}
-	return s, ok
+	return t.LiveSpanOf(arrival, nil)
 }
 
 // liveClock is what the tracker knows, at one moment, of this run's clock
@@ -2062,14 +2054,30 @@ func (t *Tracker) liveClockAtOf(arrival time.Time, own bool) (liveClock, time.Ti
 	return lc, t.recBegan
 }
 
-// SetServeOwner makes f say whether a recording is the open test's own (its
-// mapping) or the start-up's, as the store's view in force holds it (nil:
-// none, every serve is any flow's and every span LiveSpan's). The store
-// tells a serve holding its round lock (ServedMock and its forms), and the
-// tracker asks f then, before its own lock: f must read only the view in
-// force, never take a lock the store holds while it serves, and never call
-// back into the tracker.
-func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
+// ServeOwner is whose a recording is, as the store's view in force holds it
+// (SetServeOwnerOf).
+type ServeOwner uint8
+
+const (
+	// OwnerUnknown: the store cannot say, as where no test's view is in
+	// force (none yet, or a pool view between tests).
+	OwnerUnknown ServeOwner = iota
+	// OwnerTest: the open test's own recording (its mapping's) or one of
+	// the set's start-up recordings.
+	OwnerTest
+	// OwnerOther: a test's view is in force and the recording is neither
+	// its own nor the start-up's (a worker: scope's, the background's,
+	// another test's).
+	OwnerOther
+)
+
+// SetServeOwnerOf makes f say whose a recording is, as the store's view in
+// force holds it (nil: none, every serve is any flow's and every span
+// LiveSpan's). The store tells a serve holding its round lock (ServedMock
+// and its forms), and the tracker asks f then, before its own lock: f must
+// read only the view in force, never take a lock the store holds while it
+// serves, and never call back into the tracker.
+func (t *Tracker) SetServeOwnerOf(f func(*models.Mock) ServeOwner) {
 	if t == nil {
 		return
 	}
@@ -2080,24 +2088,52 @@ func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
 	t.serveOwner.Store(&f)
 }
 
+// SetServeOwner is SetServeOwnerOf for an f that always knows: true is
+// OwnerTest, false OwnerOther.
+func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
+	if f == nil {
+		t.SetServeOwnerOf(nil)
+		return
+	}
+	t.SetServeOwnerOf(func(m *models.Mock) ServeOwner {
+		if f(m) {
+			return OwnerTest
+		}
+		return OwnerOther
+	})
+}
+
 // LiveSpanOf is LiveSpan for a call that judging or a replay checks against
 // the recording rec: from the test's own serves where rec is the open test's
 // own or the start-up's (liveClockAtOf), so a worker: or background serve
 // landing between the test's clock read and its send does not put the read
 // before its span. Record's learn step reads its windows from any flow's
-// serve (CallWindowFrom), never from this.
+// serve (CallWindowFrom), never from this. LiveSpan is this with no
+// recording. The span carries where the running test began as LiveSpan's
+// does (Span.TestFrom), except against a recording the store says is not
+// the test's (OwnerOther): a call in a test's window is that test's, so a
+// value read earlier in the test passes at it, but a call checked against a
+// worker:'s recording is the worker's, whose read the test's begin does not
+// bound. Where the store cannot say (OwnerUnknown: no test's view in force,
+// as between the tracker's begin and the test view's install, or once a
+// pool view replaced it before the tracker's end) keploy cannot tell the
+// call is not the test's, and the span carries the begin as LiveSpan's
+// does: a stated limit, bounded by the test's begin.
 func (t *Tracker) LiveSpanOf(arrival time.Time, rec *models.Mock) (Span, bool) {
 	if t == nil {
 		return Span{}, false
 	}
-	own := false
+	owner := OwnerUnknown
 	if f := t.serveOwner.Load(); f != nil && rec != nil {
-		own = (*f)(rec)
+		owner = (*f)(rec)
 	}
-	lc, _ := t.liveClockAtOf(arrival, own)
+	lc, _ := t.liveClockAtOf(arrival, owner == OwnerTest)
 	s, ok := lc.span(arrival)
 	if ok {
 		s.Zone = lc.zone
+		if owner != OwnerOther {
+			s.TestFrom = lc.testFrom(s.From, arrival)
+		}
 	}
 	return s, ok
 }
