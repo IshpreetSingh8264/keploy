@@ -328,9 +328,9 @@ func (r TestsReceipt) empty() bool {
 // for that run, whatever keploy made of it (models.ScopeWindow.Reported): a
 // test keploy failed on its evidence whose own assertions passed says failed
 // and passed. Random is how the test's browser drew its random numbers in
-// that run, as its harness said at its begin (models.ScopeWindow.Random):
-// seeded, own, or "" when it said nothing. A count the agent did not report
-// in full is -1.
+// that run, as its harness said at its end, else at its begin
+// (models.ScopeWindow.Random): seeded, own, or "" when it said nothing. A
+// count the agent did not report in full is -1.
 type TestReceipt struct {
 	Name     string `yaml:"name" json:"name"`
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
