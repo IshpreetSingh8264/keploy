@@ -145,7 +145,12 @@ type Session struct {
 	// endedWhereClientStopped: the destination's stream ended where the
 	// client stopped taking it (MarkEndedWhereClientStopped). Internal; here,
 	// in the padding after the bools, so a Session stays in its size class.
-	endedWhereClientStopped atomic.Bool
+	// peerEnds: how each side of the connection ended, and which ended
+	// first (MarkPeerEnded), and whether the destination's stream ended
+	// where the client stopped taking it (MarkEndedWhereClientStopped),
+	// packed in one word (peerEndFirstShift), so a Session stays in its
+	// size class.
+	peerEnds atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
 
@@ -375,13 +380,91 @@ func (s *Session) MarkEndedWhereClientStopped() {
 	if s == nil {
 		return
 	}
-	s.endedWhereClientStopped.Store(true)
+	s.peerEnds.Or(endedWhereClientStoppedBit)
 }
 
 // EndedWhereClientStopped reports whether the destination's stream ended where
 // the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
 func (s *Session) EndedWhereClientStopped() bool {
-	return s != nil && s.endedWhereClientStopped.Load()
+	return s != nil && s.peerEnds.Load()&endedWhereClientStoppedBit != 0
+}
+
+// PeerEnd is how one side of a connection ended its side, as the relay's
+// read of it found.
+type PeerEnd uint32
+
+const (
+	// PeerOpen: the side has not ended its side, or the relay ended the
+	// read itself (the recording's stop, the other side's teardown).
+	PeerOpen PeerEnd = iota
+	// PeerClosed: the side sent its FIN.
+	PeerClosed
+	// PeerReset: the side reset the connection.
+	PeerReset
+)
+
+// peerEndFirstShift: peerEnds holds each direction's PeerEnd in two bits
+// (FromClient's in bits 0-1, FromDest's in bits 2-3), and, from this bit, the
+// direction whose side ended first, plus one (0: neither has).
+const peerEndFirstShift = 4
+
+// endedWhereClientStoppedBit, in peerEnds, past the first ender's two bits:
+// MarkEndedWhereClientStopped.
+const endedWhereClientStoppedBit = 1 << (peerEndFirstShift + 2)
+
+// MarkPeerEnded says dir's side of the connection ended, by a reset or by a FIN
+// (PeerReset, PeerClosed), as the relay's read of it found
+// (relay.Config.PeerEnded): the client's for FromClient,
+// the destination's for FromDest. The first mark of a direction is kept, and
+// so is which direction was marked first: the side that ended the exchange.
+// The relay marks it as its read returns, before it forwards the end to the
+// other side, so the other side's end, which can come only after, is marked
+// after it. The caller marks it before the stream ends, so a parser that
+// reaches the end sees it. Nil-safe.
+func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
+	if s == nil || dir > fakeconn.FromDest {
+		return
+	}
+	end := PeerClosed
+	if reset {
+		end = PeerReset
+	}
+	shift := 2 * uint32(dir)
+	for {
+		old := s.peerEnds.Load()
+		if (old>>shift)&3 != 0 {
+			return
+		}
+		next := old | uint32(end)<<shift
+		if (old>>peerEndFirstShift)&3 == 0 {
+			next |= (uint32(dir) + 1) << peerEndFirstShift
+		}
+		if s.peerEnds.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+// PeerEnded reports how dir's side of the connection ended (MarkPeerEnded):
+// PeerOpen while it has not been marked. Nil-safe.
+func (s *Session) PeerEnded(dir fakeconn.Direction) PeerEnd {
+	if s == nil || dir > fakeconn.FromDest {
+		return PeerOpen
+	}
+	return PeerEnd(s.peerEnds.Load() >> (2 * uint32(dir)) & 3)
+}
+
+// FirstPeerEnded reports which side of the connection ended its side first
+// (MarkPeerEnded), and ok false while neither has. Nil-safe.
+func (s *Session) FirstPeerEnded() (dir fakeconn.Direction, ok bool) {
+	if s == nil {
+		return 0, false
+	}
+	first := (s.peerEnds.Load() >> peerEndFirstShift) & 3
+	if first == 0 {
+		return 0, false
+	}
+	return fakeconn.Direction(first - 1), true
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was
