@@ -575,6 +575,14 @@ type UnmatchedCall struct {
 	// likely one that test recorded, such as a later exchange of a connection
 	// it opened, whose handshake was recorded there.
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Earlier mirrors MockMismatchReport.Earlier: for a call of the test's
+	// own that changed, the latest recording another test made of the same
+	// method and path, to the same destination, before the test's own.
+	// EarlierIn names, under the proven switch, the other test of the set
+	// that owns it (NameEarlierIn): a test whose skip can explain the
+	// change.
+	Earlier   string `json:"earlier,omitempty" yaml:"earlier,omitempty"`
+	EarlierIn string `json:"earlier_in,omitempty" yaml:"earlier_in,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty

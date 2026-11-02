@@ -488,6 +488,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				} else if lmiss != nil {
 					lmiss.explain(report)
 				}
+				// A call of the test's own that changed (it is no
+				// recording made elsewhere, nor one call more than the test
+				// recorded) names the latest recording another test made of
+				// its method and path before the test's own
+				// (earlierRecording): judging reads whether the replay
+				// skipped that test, whose write the call's change then
+				// likely follows. The miss stays the test's own.
+				if elsewhere == nil && !restaged && n == 0 && report != nil && provenswitch.On() {
+					if e := earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call); e != nil {
+						report.Earlier = e.Name
+					}
+				}
 				if restaged {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
 				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
