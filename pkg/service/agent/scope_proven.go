@@ -925,6 +925,8 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// the listener's drops with these.
 	a.markDrops(ctx, drops)
 	a.NoteScope(id, 0, dir, false)
+	// The worker that begins it, whose calls alone its window holds.
+	a.noteScopeInstance(id, worker)
 	// opened: the test's capture window opened (open), so a begin that
 	// fails after it takes the window back.
 	var open func()
