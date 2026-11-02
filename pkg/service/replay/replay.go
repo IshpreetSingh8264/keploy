@@ -7110,6 +7110,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.consumedMockNames[name] = struct{}{}
 	}
 	r.completeTestReportMu.Unlock()
+	logFaultsServed(r.logger, testSetID, allConsumedAcrossCycles, mockLookup)
 
 	return testSetStatus, nil
 }
@@ -7299,6 +7300,7 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			}
 		}
 		info.carryOver, info.place = models.IsCarryOver(mock), models.PlaceOf(mock)
+		info.fault = mock.FaultServed()
 		lookup[mock.Name] = info
 	}
 }
