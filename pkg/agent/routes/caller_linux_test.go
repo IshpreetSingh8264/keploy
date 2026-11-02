@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -87,9 +88,16 @@ func TestTCPOwnerMatchesBothEnds(t *testing.T) {
 // the server at its value and exit.
 const envClaimFrom = "KEPLOY_TEST_CLAIM_FROM"
 
+// envBegin makes that child send a test's begin instead.
+const envBegin = "KEPLOY_TEST_CLAIM_BEGIN"
+
 func TestMain(m *testing.M) {
 	if url := os.Getenv(envClaimFrom); url != "" {
-		resp, err := http.Post(url, "application/json", strings.NewReader(`{"key":"orders","pid":1}`))
+		body := `{"key":"orders","pid":1}`
+		if os.Getenv(envBegin) != "" {
+			body = `{"name":"TestA","canSkip":true}`
+		}
+		resp, err := http.Post(url, "application/json", strings.NewReader(body))
 		if err != nil {
 			os.Exit(3)
 		}
@@ -115,5 +123,23 @@ func TestTheClaimReadsTheCallerFromTheConnection(t *testing.T) {
 	}
 	if svc.claimKey != "orders" || svc.claimCaller != c.Process.Pid {
 		t.Fatalf("claimed key %q for process %d, want orders for the child %d", svc.claimKey, svc.claimCaller, c.Process.Pid)
+	}
+}
+
+// A begin's caller, read while it is served (in a run of more than one test
+// worker), is the process that sent it: this test binary run again.
+func TestABeginsCallerIsReadFromItsConnection(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	svc := &wireSvc{readBegin: true, beginResp: models.ScopeBeginResp{V: 1, Status: "ok"}}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleScopeBegin))
+	defer srv.Close()
+	c := exec.Command(os.Args[0], "-test.run=^$")
+	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL, envBegin+"=1")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("the beginning child failed: %v: %s", err, out)
+	}
+	if len(svc.begun) != 1 || svc.beginPID != c.Process.Pid {
+		t.Fatalf("begins %+v read as process %d, want one from the child %d", svc.begun, svc.beginPID, c.Process.Pid)
 	}
 }
